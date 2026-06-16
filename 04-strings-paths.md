@@ -4,6 +4,43 @@
 
 ---
 
+## 用变量少调命令
+
+Bash 自带一批内置变量，比调命令快、准、省进程。常见写法 `pwd` / `date` / `uuidgen` 十有八九是不熟悉这些变量。
+
+```bash
+# 当前目录
+cd /some/path
+cd "$OLDPWD"                 # 回到上一个目录，比 cd - 可靠（- 只记得上一个）
+PWD="$PWD/work"              # 在子 shell 里模拟 cd
+
+# 随机值
+echo "$RANDOM"               # 0-32767，做临时后缀够用了
+echo "$RANDOM-$RANDOM"       # 组合使用避免碰撞
+
+# 时间戳
+echo "$EPOCHSECONDS"         # 当前 Unix 时间戳，bash 4.2+
+echo "$EPOCHREALTIME"        # 微秒级：1705481234.567890
+
+# 脚本运行时长
+SECONDS=0
+long_running_task
+echo "Elapsed: ${SECONDS}s"  # 不用 date 相减
+
+# read 的默认变量
+read                       # 读入 $REPLY，不需要声明变量名
+echo "$REPLY"
+
+# 进程信息
+echo "PID: $$"             # 当前进程 ID
+echo "PPID: $PPID"         # 父进程 ID
+echo "UID: $UID"           # 当前用户 ID
+```
+
+**原则**：能用一个字符（`$PWD`）解决的问题，别用六行代码（`tmp=$(pwd); cd ...; cd "$tmp"`）。
+
+---
+
 ## 路径操作的三个深坑
 
 ### 坑一：软链接
