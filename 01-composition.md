@@ -161,3 +161,143 @@ grep_safe() {
 ```
 
 或者更极简的做法——很多老运维只用 `set -u`，手工处理关键错误，反而更可控。
+
+---
+
+## 设计可管道的脚本——让你的程序也能被 `|`
+
+前面都在讲怎么消费管道。这一节讲怎么**生产**——让自己写的脚本成为管道中合格的一环。
+
+### stdin/stdout 是默认接口
+
+```bash
+# 坏的：只接受文件名参数，和管道不兼容
+parse_logs() {
+    local file="$1"
+    grep 'ERROR' "$file" | awk '{print $1, $2}'
+}
+# 你想这样用不行了：tail -f app.log | parse_logs
+
+# 好的：没文件就从 /dev/stdin 读
+parse_logs() {
+    local input="${1:-/dev/stdin}"
+    grep 'ERROR' "$input" | awk '{print $1, $2}'
+}
+# 两种用法都支持：
+# parse_logs /var/log/app.log
+# tail -f /var/log/app.log | parse_logs
+```
+
+支持 `-` 作为标准占位符：
+
+```bash
+parse_logs() {
+    local input="$1"
+    [[ "$input" == "-" ]] && input="/dev/stdin"
+    ...
+}
+```
+
+### 错误/日志走 stderr，status 走 stdout
+
+这是最核心的管道契约。stdout 归下游，stderr 归终端。
+
+```bash
+# 坏的：和 grep 不兼容
+check_health() {
+    if curl -sf http://localhost/health; then
+        echo "OK"
+    else
+        echo "FAIL"
+    fi
+}
+
+check_health | grep "ERROR"
+# 永远匹配不到——"OK" 和 "FAIL" 都混在 stdout 里
+
+# 好的：状态信息走 stderr，结果走 stdout
+check_health() {
+    if curl -sf http://localhost/health; then
+        echo "healthy"     # stdout：给下游
+        echo "[OK] health check passed" >&2  # stderr：给人看
+    else
+        echo "unhealthy"
+        echo "[ERROR] health check failed" >&2
+    fi
+}
+
+check_health | grep "unhealthy"  # 正常工作了
+```
+
+### 流式处理，不加载全部到内存
+
+```bash
+# 坏的：处理过程中加载全部
+process_lines() {
+    local lines
+    lines=$(cat)          # 全部读入内存
+    while IFS= read -r line; do
+        process "$line"
+    done <<< "$lines"
+}
+
+# 好的：边读边吐，10MB 和 10GB 一样处理
+process_lines() {
+    while IFS= read -r line; do
+        process "$line"
+    done
+}
+```
+
+### 退出码要有意义
+
+下游靠 `$?` 判断成败。不要所有情况都 `exit 0`。
+
+```bash
+# 坏的：下游永远是 0
+validate_config() {
+    if [[ -f "$1" ]]; then
+        echo "valid"
+    else
+        echo "invalid"
+    fi
+    exit 0  # grep "invalid" && ... 永远不会触发
+}
+
+# 好的：0 = 正常，非 0 = 异常
+validate_config() {
+    if [[ -f "$1" ]]; then
+        echo "valid"
+        return 0
+    else
+        echo "invalid" >&2
+        return 1
+    fi
+}
+```
+
+退出码惯例：**0 = 成功，1 = 通用错误，2 = 用法错误**，其他码留给具体语义。
+
+### 优雅处理 SIGPIPE
+
+下游 `head` / `awk` 读完就关管道，你还在写 stdout 就会收到 SIGPIPE。
+
+```bash
+# 不优雅：收到 SIGPIPE 还傻愣着
+produce_data() {
+    for i in $(seq 1000000); do
+        echo "line $i"
+    done
+}
+produce_data | head -5
+# seq 被 SIGPIPE 杀掉，退出码 141
+
+# 优雅：写 stdout 时容忍 SIGPIPE
+produce_data() {
+    for i in $(seq 1000000); do
+        echo "line $i" || break   # 写失败就停（管道断了）
+    done
+}
+produce_data | head -5
+# 管道断开后 echo 失败 → break → 正常退出 0
+```
